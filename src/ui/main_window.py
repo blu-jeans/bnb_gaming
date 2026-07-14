@@ -209,6 +209,28 @@ class DragListWidget(QListWidget):
         self.setSpacing(6)
         self.setWordWrap(True)
 
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self.adjust_items_size()
+
+    def adjust_items_size(self) -> None:
+        """根据最新渲染出的物理宽度，重新设置大池中每一个项的 sizeHint，消灭隐藏 TabWidget 导致初始缩水成 ... 的缺陷"""
+        count = self.count()
+        if count == 0:
+            return
+            
+        font = QFont("Microsoft YaHei UI", 12)
+        from PyQt6.QtGui import QFontMetrics
+        metrics = QFontMetrics(font)
+        
+        for i in range(count):
+            item = self.item(i)
+            if item:
+                text = item.text()
+                # 根据真实文本宽度加气泡裕度
+                width = metrics.horizontalAdvance(text) + 45
+                item.setSizeHint(QSize(width, 32))
+
     def startDrag(self, supportedActions: Qt.DropAction) -> None:
         """原生系统拖拽虚函数，极度稳定"""
         item = self.currentItem()
@@ -237,17 +259,23 @@ class DragListWidget(QListWidget):
 
         result = drag.exec(Qt.DropAction.MoveAction)
         if result == Qt.DropAction.MoveAction:
-            self.takeItem(self.row(item))
+            try:
+                row = self.row(item)
+                if row >= 0:
+                    self.takeItem(row)
+            except RuntimeError:
+                # 若 item 包装的 C++ 对象已被销毁（例如由于大池/活跃池被重新 clear 并重构刷新），直接安全忽略即可
+                pass
 
     def mouseReleaseEvent(self, event) -> None:
         item = self.itemAt(event.position().toPoint())
         if item:
             rect = self.visualItemRect(item)
-            if event.position().x() > rect.right() - 24:
+            if event.position().x() > rect.right() - 40:
                 name = item.data(Qt.ItemDataRole.UserRole)
                 reply = QMessageBox.question(
-                    self, "🗑️ 确认删除",
-                    f"确认要将「{name}」从系统数据库中彻底删除吗？",
+                    self, "🗑️ 确认物理删除",
+                    f"您确定要将「{name}」从系统数据库中【彻底物理删除】吗？\n（此操作将永久移除该成员/选手，无法恢复！）",
                     QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
                 )
                 if reply == QMessageBox.StandardButton.Yes:
@@ -291,6 +319,39 @@ class DropListWidget(QListWidget):
         self.setSpacing(6)
         self.setWordWrap(True)
 
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self.adjust_items_size()
+
+    def adjust_items_size(self) -> None:
+        """根据当前列表物理宽度，动态限制每个胶囊的宽度，确保每行至少塞下2个胶囊"""
+        count = self.count()
+        if count == 0:
+            return
+            
+        # 减去滚动条（约16px）和 item 间距与边沿 margin（约18px）
+        available_width = self.width() - 34
+        if available_width < 100:
+            return
+            
+        # 每个胶囊的最大宽度上限为可用宽度的一半（扣除 18 像素边距和 spacing），保证并排容纳2个以上
+        max_item_width = int(available_width / 2) - 18
+        
+        font = QFont("Microsoft YaHei UI", 11)
+        from PyQt6.QtGui import QFontMetrics
+        metrics = QFontMetrics(font)
+        
+        for i in range(count):
+            item = self.item(i)
+            if item:
+                text = item.text()
+                # 真实渲染的宽度
+                text_w = metrics.horizontalAdvance(text) + 36
+                # 宽度限制在 max_item_width 以内，但也不能太窄
+                final_w = min(text_w, max_item_width)
+                final_w = max(final_w, 90)
+                item.setSizeHint(QSize(final_w, 32))
+
     def dragEnterEvent(self, event) -> None:
         if event.mimeData().hasText():
             event.accept()
@@ -307,6 +368,15 @@ class DropListWidget(QListWidget):
 
     def dropEvent(self, event) -> None:
         """处理拖放事件"""
+        # 防呆机制：若当前未开启任何赛事，拦截并提示开启赛事
+        if self.main_window.current_tournament is None:
+            QMessageBox.warning(
+                self, "⚠️ 无法投注/指派选手",
+                "当前没有进行中的赛事，无法进行下注或指派选手！\n\n请先点击右侧控制台的「🏆 开始新赛事」以开启本届比赛。"
+            )
+            event.ignore()
+            return
+
         if not event.mimeData().hasText():
             event.ignore()
             return
@@ -353,7 +423,7 @@ class DropListWidget(QListWidget):
                 return
 
             # 添加到投注列表
-            display_text = f"💰 {member_name}  [{amount}分]"
+            display_text = f"💰 {member_name}  [{amount}分]  ×"
             item = QListWidgetItem(display_text)
             item.setData(Qt.ItemDataRole.UserRole, member_name)
             item.setData(Qt.ItemDataRole.UserRole + 1, amount)
@@ -364,6 +434,10 @@ class DropListWidget(QListWidget):
             width = metrics.horizontalAdvance(display_text) + 45
             item.setSizeHint(QSize(width, 32))
             self.addItem(item)
+            self.adjust_items_size()
+            self.main_window.active_members_this_tournament.add(member_name)
+            self.main_window._refresh_active_pools()
+            self.main_window.member_tabs.setCurrentIndex(1)
             event.setDropAction(Qt.DropAction.MoveAction)
             event.acceptProposedAction()
 
@@ -383,7 +457,7 @@ class DropListWidget(QListWidget):
                 return
 
             # 添加到选手列表
-            display_text = f"⚔️ {nickname}"
+            display_text = f"⚔️ {nickname}  ×"
             item = QListWidgetItem(display_text)
             item.setData(Qt.ItemDataRole.UserRole, nickname)
             item.setData(Qt.ItemDataRole.UserRole + 1, 0) # 选手无下注分
@@ -394,6 +468,10 @@ class DropListWidget(QListWidget):
             width = metrics.horizontalAdvance(display_text) + 45
             item.setSizeHint(QSize(width, 32))
             self.addItem(item)
+            self.adjust_items_size()
+            self.main_window.active_players_this_tournament.add(nickname)
+            self.main_window._refresh_active_pools()
+            self.main_window.player_tabs.setCurrentIndex(1)
             event.acceptProposedAction()
             
         else:
@@ -410,10 +488,34 @@ class DropListWidget(QListWidget):
         menu.addAction(action_return)
         menu.exec(self.mapToGlobal(pos))
 
+    def mouseReleaseEvent(self, event) -> None:
+        item = self.itemAt(event.position().toPoint())
+        if item:
+            rect = self.visualItemRect(item)
+            if event.position().x() > rect.right() - 40:
+                self._return_to_pool(item)
+                return
+        super().mouseReleaseEvent(event)
+
     def _return_to_pool(self, item: QListWidgetItem) -> None:
-        """将成员退回大池"""
+        """将成员退回大池（带确认以防手滑误触）"""
         name = item.data(Qt.ItemDataRole.UserRole)
         bet_amount = item.data(Qt.ItemDataRole.UserRole + 1) or 0
+
+        # 防手滑二次确认弹窗
+        if self.is_player_list:
+            title = "🗑️ 移除选手"
+            text = f"确定要将参赛选手「{name}」从当前队伍中移除并退回到选手池吗？"
+        else:
+            title = "🗑️ 取消投注"
+            text = f"确定要取消「{name}」的「{bet_amount}分」投注并将积分退回到大池吗？"
+
+        reply = QMessageBox.question(
+            self, title, text,
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
 
         # 从当前列表移除
         row = self.row(item)
@@ -425,6 +527,228 @@ class DropListWidget(QListWidget):
         else:
             # 退回到成员大池
             self.main_window._add_member_to_pool(name, bet_amount)
+        self.main_window._refresh_active_pools()
+
+
+# ────────────────────────────────────────────────────────────────────
+# 历史轮次详情弹窗
+# ────────────────────────────────────────────────────────────────────
+
+class MatchHistoryDetailsDialog(QDialog):
+    """
+    往期比赛单轮详情弹窗，精细展示对局结果、选手及投注详情
+
+    @author hyq
+    @version 2026-07-14
+    """
+    def __init__(self, history: MatchHistory, parent: QWidget | None = None):
+        super().__init__(parent)
+        self.setWindowTitle(f"📜 赛事ID {history.tournament_id} - 第 {history.round_number} 轮详情")
+        self.setMinimumSize(700, 600)
+        self.resize(780, 680)
+        self.setStyleSheet(DARK_STYLE)
+        self._build_ui(history)
+
+    def _build_ui(self, h: MatchHistory) -> None:
+        layout = QVBoxLayout(self)
+        layout.setSpacing(15)
+        layout.setContentsMargins(24, 24, 24, 24)
+
+        # 头部：轮次大字信息
+        header_label = QLabel(f"📜 赛事ID: {h.tournament_id}  •  第 {h.round_number} 轮")
+        header_label.setFont(QFont("Microsoft YaHei UI", 12))
+        header_label.setStyleSheet("color: #88A0C0;")
+        header_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(header_label)
+
+        # 比分大字版卡
+        score_layout = QHBoxLayout()
+        score_layout.setSpacing(20)
+        score_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+        red_score_lbl = QLabel(f"🔴 红队\n{h.red_score}")
+        red_score_lbl.setFont(QFont("Microsoft YaHei UI", 18, QFont.Weight.Bold))
+        red_score_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        
+        vs_lbl = QLabel("VS")
+        vs_lbl.setFont(QFont("Outfit", 22, QFont.Weight.Bold))
+        vs_lbl.setStyleSheet("color: #718096;")
+        vs_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+        green_score_lbl = QLabel(f"🟢 绿队\n{h.green_score}")
+        green_score_lbl.setFont(QFont("Microsoft YaHei UI", 18, QFont.Weight.Bold))
+        green_score_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+        # 根据胜利者给文字涂色
+        if h.winner == TeamColor.RED:
+            red_score_lbl.setStyleSheet("color: #EF5350; background: rgba(239, 83, 80, 0.15); border: 2px solid #EF5350; border-radius: 12px; padding: 12px 24px;")
+            green_score_lbl.setStyleSheet("color: #718096; background: rgba(255, 255, 255, 0.05); border: 1px dashed #4A5568; border-radius: 12px; padding: 12px 24px;")
+        else:
+            red_score_lbl.setStyleSheet("color: #718096; background: rgba(255, 255, 255, 0.05); border: 1px dashed #4A5568; border-radius: 12px; padding: 12px 24px;")
+            green_score_lbl.setStyleSheet("color: #66BB6A; background: rgba(102, 187, 106, 0.15); border: 2px solid #66BB6A; border-radius: 12px; padding: 12px 24px;")
+
+        score_layout.addWidget(red_score_lbl)
+        score_layout.addWidget(vs_lbl)
+        score_layout.addWidget(green_score_lbl)
+        layout.addLayout(score_layout)
+
+        # 庄家本轮盈亏
+        profit_color = "#4CAF50" if h.banker_round_profit >= 0 else "#F44336"
+        profit_sign = "+" if h.banker_round_profit >= 0 else ""
+        banker_profit_lbl = QLabel(f"👑 庄家本局盈亏：{profit_sign}{h.banker_round_profit} 分")
+        banker_profit_lbl.setFont(QFont("Microsoft YaHei UI", 14, QFont.Weight.Bold))
+        banker_profit_lbl.setStyleSheet(f"color: {profit_color}; background: rgba(30, 41, 59, 0.8); border: 1px solid #334155; border-radius: 8px; padding: 10px;")
+        banker_profit_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(banker_profit_lbl)
+
+        # 参赛选手展示
+        players_group = QGroupBox("⚔️ 双方对决选手")
+        players_layout = QHBoxLayout(players_group)
+        players_layout.setSpacing(15)
+
+        red_players_box = QGroupBox("🔴 红队选手")
+        red_p_layout = QVBoxLayout(red_players_box)
+        red_p_lbl = QLabel(h.red_players or "暂无选手")
+        red_p_lbl.setFont(QFont("Microsoft YaHei UI", 11))
+        red_p_lbl.setStyleSheet("color: #FFCDD2;")
+        red_p_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        red_p_layout.addWidget(red_p_lbl)
+
+        green_players_box = QGroupBox("🟢 绿队选手")
+        green_p_layout = QVBoxLayout(green_players_box)
+        green_p_lbl = QLabel(h.green_players or "暂无选手")
+        green_p_lbl.setFont(QFont("Microsoft YaHei UI", 11))
+        green_p_lbl.setStyleSheet("color: #C8E6C9;")
+        green_p_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        green_p_layout.addWidget(green_p_lbl)
+
+        players_layout.addWidget(red_players_box)
+        players_layout.addWidget(green_players_box)
+        layout.addWidget(players_group)
+
+        # 投注清单解析与横向分栏排版
+        bets_group = QGroupBox("💰 投注下注细则清单")
+        bets_main_layout = QVBoxLayout(bets_group)
+        
+        bets_columns_layout = QHBoxLayout()
+        bets_columns_layout.setSpacing(15)
+
+        red_bets_list = QListWidget()
+        red_bets_list.setStyleSheet("""
+            QListWidget {
+                background-color: rgba(239, 83, 80, 0.03);
+                border: 1px solid rgba(239, 83, 80, 0.15);
+                border-radius: 8px;
+                padding: 8px;
+            }
+            QListWidget::item {
+                background: rgba(239, 83, 80, 0.12);
+                color: #FFCDD2;
+                border: 1px solid rgba(239, 83, 80, 0.25);
+                border-radius: 6px;
+                padding: 6px 12px;
+                margin-bottom: 4px;
+            }
+            QListWidget::item:hover {
+                background: rgba(239, 83, 80, 0.18);
+            }
+        """)
+        
+        green_bets_list = QListWidget()
+        green_bets_list.setStyleSheet("""
+            QListWidget {
+                background-color: rgba(102, 187, 106, 0.03);
+                border: 1px solid rgba(102, 187, 106, 0.15);
+                border-radius: 8px;
+                padding: 8px;
+            }
+            QListWidget::item {
+                background: rgba(102, 187, 106, 0.12);
+                color: #C8E6C9;
+                border: 1px solid rgba(102, 187, 106, 0.25);
+                border-radius: 6px;
+                padding: 6px 12px;
+                margin-bottom: 4px;
+            }
+            QListWidget::item:hover {
+                background: rgba(102, 187, 106, 0.18);
+            }
+        """)
+
+        # 解析 bet_details
+        import re
+        has_bet = False
+        if h.bet_details and h.bet_details != "无投注":
+            items = [x.strip() for x in h.bet_details.split(",") if x.strip()]
+            for item in items:
+                match = re.match(r"([^(]+)\((红队|绿队)(\d+)分\)", item)
+                if match:
+                    has_bet = True
+                    name = match.group(1).strip()
+                    team = match.group(2)
+                    amount = match.group(3)
+                    
+                    display_text = f"👤  {name}    [{amount}分]"
+                    list_item = QListWidgetItem(display_text)
+                    list_item.setFont(QFont("Microsoft YaHei UI", 11, QFont.Weight.Bold))
+                    list_item.setSizeHint(QSize(0, 38))
+                    
+                    if team == "红队":
+                        red_bets_list.addItem(list_item)
+                    else:
+                        green_bets_list.addItem(list_item)
+                else:
+                    # 备用，防格式匹配失败
+                    list_item = QListWidgetItem(item)
+                    list_item.setFont(QFont("Microsoft YaHei UI", 11, QFont.Weight.Bold))
+                    list_item.setSizeHint(QSize(0, 38))
+                    red_bets_list.addItem(list_item)
+
+        if not has_bet:
+            empty_item1 = QListWidgetItem("暂无投注人员")
+            empty_item1.setForeground(QColor("#718096"))
+            empty_item1.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            red_bets_list.addItem(empty_item1)
+
+            empty_item2 = QListWidgetItem("暂无投注人员")
+            empty_item2.setForeground(QColor("#718096"))
+            empty_item2.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            green_bets_list.addItem(empty_item2)
+
+        red_bets_box = QWidget()
+        r_box_layout = QVBoxLayout(red_bets_box)
+        r_box_layout.setContentsMargins(0,0,0,0)
+        r_box_layout.addWidget(QLabel("🔴 投注红队："))
+        r_box_layout.addWidget(red_bets_list)
+
+        green_bets_box = QWidget()
+        g_box_layout = QVBoxLayout(green_bets_box)
+        g_box_layout.setContentsMargins(0,0,0,0)
+        g_box_layout.addWidget(QLabel("🟢 投注绿队："))
+        g_box_layout.addWidget(green_bets_list)
+
+        bets_columns_layout.addWidget(red_bets_box)
+        bets_columns_layout.addWidget(green_bets_box)
+        
+        bets_main_layout.addLayout(bets_columns_layout)
+        layout.addWidget(bets_group)
+
+        # 底部关闭按钮
+        close_btn = QPushButton("关闭")
+        close_btn.setFixedHeight(38)
+        close_btn.setFont(QFont("Microsoft YaHei UI", 11, QFont.Weight.Bold))
+        close_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #3182CE;
+                color: white;
+                border-radius: 6px;
+            }
+            QPushButton:hover {
+                background-color: #2B6CB0;
+            }
+        """)
+        close_btn.clicked.connect(self.accept)
+        layout.addWidget(close_btn)
 
 
 # ────────────────────────────────────────────────────────────────────
@@ -664,6 +988,10 @@ class MainWindow(QMainWindow):
         self.game_accounts: list[Any] = []
         # 内存中的下注信息映射: {member_name: bet_amount}
         self._blind_bets: dict[str, int] = {}
+        
+        # 活跃池缓存集合，记录本届赛事所有投注过的成员与上场过的选手
+        self.active_members_this_tournament: set[str] = set()
+        self.active_players_this_tournament: set[str] = set()
 
         self.setWindowTitle("🎮 泡泡堂家族比赛积分竞猜系统")
         self.setMinimumSize(1150, 750)
@@ -710,11 +1038,11 @@ class MainWindow(QMainWindow):
 
         # 中栏 - 红绿两队阵营
         center_panel = self._build_teams_panel()
-        layout.addWidget(center_panel, 50)
+        layout.addWidget(center_panel, 57)
 
         # 右栏 - 控制台
         right_panel = self._build_control_panel()
-        layout.addWidget(right_panel, 25)
+        layout.addWidget(right_panel, 18)
 
         return widget
 
@@ -725,21 +1053,36 @@ class MainWindow(QMainWindow):
         panel_layout.setContentsMargins(0, 0, 0, 0)
         panel_layout.setSpacing(10)
 
-        # 1. 家族成员大池
+        # 1. 家族成员大池 GroupBox
         group_member = QGroupBox("🏠 家族成员大池 (投注用)")
         member_layout = QVBoxLayout(group_member)
+        member_layout.setContentsMargins(6, 8, 6, 6)
         member_layout.setSpacing(6)
 
         hint_label = QLabel("💡 拖拽成员至红/绿队进行投注")
-        hint_label.setStyleSheet("color: #888; font-size: 11px; margin-bottom: 4px;")
+        hint_label.setStyleSheet("color: #888; font-size: 11px; margin-bottom: 2px;")
         member_layout.addWidget(hint_label)
+
+        # 【新】引入 QTabWidget 叠放成员池与活跃池，空间瞬间释放！
+        self.member_tabs = QTabWidget()
+        self.member_tabs.setStyleSheet("""
+            QTabWidget::pane { border: 1px solid #2d2d44; border-radius: 4px; background-color: #111122; }
+            QTabBar::tab { background: #1a1a2e; color: #a0aec0; padding: 6px 12px; border-top-left-radius: 4px; border-top-right-radius: 4px; }
+            QTabBar::tab:selected { background: #2d2d44; color: #FFD700; font-weight: bold; }
+        """)
+
+        # Tab 1: 全部成员
+        tab_all_member = QWidget()
+        all_member_layout = QVBoxLayout(tab_all_member)
+        all_member_layout.setContentsMargins(4, 4, 4, 4)
+        all_member_layout.setSpacing(4)
 
         self.pool_list = DragListWidget(pool_type="member")
         self.pool_list.setFont(QFont("Microsoft YaHei UI", 12))
-        member_layout.addWidget(self.pool_list)
+        all_member_layout.addWidget(self.pool_list)
 
         self.input_add_member = QLineEdit()
-        self.input_add_member.setPlaceholderText("✍️ 输入新成员姓名，回车直接添加")
+        self.input_add_member.setPlaceholderText("🔍 输入姓名查询搜索，回车物理添加新成员")
         self.input_add_member.setStyleSheet("""
             QLineEdit {
                 background-color: #1a1a2e;
@@ -755,25 +1098,54 @@ class MainWindow(QMainWindow):
             }
         """)
         self.input_add_member.returnPressed.connect(self._on_quick_add_member)
-        member_layout.addWidget(self.input_add_member)
+        self.input_add_member.textChanged.connect(self._on_search_member)
+        all_member_layout.addWidget(self.input_add_member)
+
+        # Tab 2: 本届活跃成员
+        tab_active_member = QWidget()
+        active_member_layout = QVBoxLayout(tab_active_member)
+        active_member_layout.setContentsMargins(4, 4, 4, 4)
+
+        self.active_member_pool_list = DragListWidget(pool_type="member")
+        self.active_member_pool_list.setFont(QFont("Microsoft YaHei UI", 12))
+        active_member_layout.addWidget(self.active_member_pool_list)
+
+        self.member_tabs.addTab(tab_all_member, "📁 全部成员")
+        self.member_tabs.addTab(tab_active_member, "⭐ 本届活跃")
+        member_layout.addWidget(self.member_tabs)
 
         panel_layout.addWidget(group_member, 55)
 
-        # 2. 参赛选手池
+        # 2. 参赛选手池 GroupBox
         group_player = QGroupBox("🎮 参赛选手池 (当次比赛实际ID)")
         player_layout = QVBoxLayout(group_player)
+        player_layout.setContentsMargins(6, 8, 6, 6)
         player_layout.setSpacing(6)
 
         hint_label2 = QLabel("💡 拖拽至红/绿选手列表")
-        hint_label2.setStyleSheet("color: #888; font-size: 11px; margin-bottom: 4px;")
+        hint_label2.setStyleSheet("color: #888; font-size: 11px; margin-bottom: 2px;")
         player_layout.addWidget(hint_label2)
+
+        # 【新】引入 QTabWidget 叠放选手池与活跃选手池
+        self.player_tabs = QTabWidget()
+        self.player_tabs.setStyleSheet("""
+            QTabWidget::pane { border: 1px solid #2d2d44; border-radius: 4px; background-color: #111122; }
+            QTabBar::tab { background: #1a1a2e; color: #a0aec0; padding: 6px 12px; border-top-left-radius: 4px; border-top-right-radius: 4px; }
+            QTabBar::tab:selected { background: #2d2d44; color: #90CAF9; font-weight: bold; }
+        """)
+
+        # Tab 1: 全部选手
+        tab_all_player = QWidget()
+        all_player_layout = QVBoxLayout(tab_all_player)
+        all_player_layout.setContentsMargins(4, 4, 4, 4)
+        all_player_layout.setSpacing(4)
 
         self.player_pool_list = DragListWidget(pool_type="player")
         self.player_pool_list.setFont(QFont("Microsoft YaHei UI", 12))
-        player_layout.addWidget(self.player_pool_list)
+        all_player_layout.addWidget(self.player_pool_list)
 
         self.input_add_player = QLineEdit()
-        self.input_add_player.setPlaceholderText("✍️ 输入新游戏账号，回车直接添加")
+        self.input_add_player.setPlaceholderText("🔍 输入账号查询搜索，回车物理添加新选手")
         self.input_add_player.setStyleSheet("""
             QLineEdit {
                 background-color: #1a1a2e;
@@ -789,7 +1161,21 @@ class MainWindow(QMainWindow):
             }
         """)
         self.input_add_player.returnPressed.connect(self._on_quick_add_player)
-        player_layout.addWidget(self.input_add_player)
+        self.input_add_player.textChanged.connect(self._on_search_player)
+        all_player_layout.addWidget(self.input_add_player)
+
+        # Tab 2: 本届活跃选手
+        tab_active_player = QWidget()
+        active_player_layout = QVBoxLayout(tab_active_player)
+        active_player_layout.setContentsMargins(4, 4, 4, 4)
+
+        self.active_player_pool_list = DragListWidget(pool_type="player")
+        self.active_player_pool_list.setFont(QFont("Microsoft YaHei UI", 12))
+        active_player_layout.addWidget(self.active_player_pool_list)
+
+        self.player_tabs.addTab(tab_all_player, "📁 全部选手")
+        self.player_tabs.addTab(tab_active_player, "⭐ 本届活跃")
+        player_layout.addWidget(self.player_tabs)
 
         panel_layout.addWidget(group_player, 45)
 
@@ -1047,8 +1433,8 @@ class MainWindow(QMainWindow):
         layout = QHBoxLayout(widget)
         layout.setSpacing(10)
 
-        # 左栏 - 往期比赛历史
-        history_group = QGroupBox("📜 往期比赛历史")
+        # 左栏 - 往期比赛历史 (带提示和显式详情按钮)
+        history_group = QGroupBox("📜 往期比赛历史 (双击单行或点击下方按钮查看详情)")
         history_layout = QVBoxLayout(history_group)
 
         self.history_table = QTableWidget()
@@ -1065,7 +1451,26 @@ class MainWindow(QMainWindow):
         self.history_table.setStyleSheet(
             "QTableWidget { alternate-background-color: #1a2a4e; }"
         )
+        self.history_table.itemDoubleClicked.connect(self._on_history_item_double_clicked)
         history_layout.addWidget(self.history_table)
+
+        # 显式的查看详情按钮，直观性大增！
+        self.btn_view_detail = QPushButton("🔍 查看选中轮次详情 (大字大面板)")
+        self.btn_view_detail.setFixedHeight(34)
+        self.btn_view_detail.setFont(QFont("Microsoft YaHei UI", 10, QFont.Weight.Bold))
+        self.btn_view_detail.setStyleSheet("""
+            QPushButton {
+                background-color: #2b3a60;
+                color: #e2e8f0;
+                border: 1px solid #3d4f7c;
+                border-radius: 6px;
+            }
+            QPushButton:hover {
+                background-color: #384d80;
+            }
+        """)
+        self.btn_view_detail.clicked.connect(self._on_view_selected_history_detail)
+        history_layout.addWidget(self.btn_view_detail)
         layout.addWidget(history_group, 55)
 
         # 右栏 - 天梯积分榜
@@ -1149,6 +1554,25 @@ class MainWindow(QMainWindow):
                     self.current_round_number = (max_round or 0) + 1
                     self._update_tournament_status()
                     self._refresh_tournament_ladder()
+                    
+                    # 从往期历史恢复本届赛事已活跃的成员和选手缓存
+                    histories = self.repo.get_match_history()
+                    for h in histories:
+                        if h.tournament_id == self.current_tournament.id:
+                            if h.red_players:
+                                for p in [x.strip() for x in h.red_players.split(",") if x.strip()]:
+                                    self.active_players_this_tournament.add(p)
+                            if h.green_players:
+                                for p in [x.strip() for x in h.green_players.split(",") if x.strip()]:
+                                    self.active_players_this_tournament.add(p)
+                            if h.bet_details and h.bet_details != "无投注":
+                                import re
+                                items = [x.strip() for x in h.bet_details.split(",") if x.strip()]
+                                for item in items:
+                                    match = re.match(r"([^(]+)\((红队|绿队)(\d+)分\)", item)
+                                    if match:
+                                        self.active_members_this_tournament.add(match.group(1).strip())
+                    self._refresh_active_pools()
         except Exception:
             pass
 
@@ -1214,9 +1638,95 @@ class MainWindow(QMainWindow):
         item.setSizeHint(QSize(width, 32))
         self.player_pool_list.addItem(item)
 
+    def _refresh_active_pools(self) -> None:
+        """刷新本届赛事的活跃池（当前投注成员/当前比赛选手）"""
+        self.active_member_pool_list.clear()
+        self.active_player_pool_list.clear()
+
+        # 1. 活跃成员池（大池排他去重）
+        for name in sorted(self.active_members_this_tournament):
+            already_in_team = False
+            for list_widget in [self.red_bettors_list, self.green_bettors_list]:
+                for i in range(list_widget.count()):
+                    item = list_widget.item(i)
+                    if item and item.data(Qt.ItemDataRole.UserRole) == name:
+                        already_in_team = True
+                        break
+            if already_in_team:
+                continue
+
+            display = f"👤 {name}"
+            item = QListWidgetItem(display)
+            item.setData(Qt.ItemDataRole.UserRole, name)
+            font = QFont("Microsoft YaHei UI", 11)
+            item.setFont(font)
+            from PyQt6.QtGui import QFontMetrics
+            metrics = QFontMetrics(font)
+            width = metrics.horizontalAdvance(display) + 45
+            item.setSizeHint(QSize(width, 32))
+            self.active_member_pool_list.addItem(item)
+
+        # 2. 活跃选手池（选手去重）
+        for nickname in sorted(self.active_players_this_tournament):
+            already_in_team = False
+            for list_widget in [self.red_players_list, self.green_players_list]:
+                for i in range(list_widget.count()):
+                    item = list_widget.item(i)
+                    if item and item.data(Qt.ItemDataRole.UserRole) == nickname:
+                        already_in_team = True
+                        break
+            if already_in_team:
+                continue
+
+            display = f"🎮 {nickname}"
+            item = QListWidgetItem(display)
+            item.setData(Qt.ItemDataRole.UserRole, nickname)
+            font = QFont("Microsoft YaHei UI", 11)
+            item.setFont(font)
+            from PyQt6.QtGui import QFontMetrics
+            metrics = QFontMetrics(font)
+            width = metrics.horizontalAdvance(display) + 45
+            item.setSizeHint(QSize(width, 32))
+            self.active_player_pool_list.addItem(item)
+
+        # 刷新完成后，保持当前的过滤词状态
+        self._on_search_member(self.input_add_member.text())
+        self._on_search_player(self.input_add_player.text())
+
+    def _on_search_member(self, text: str) -> None:
+        """成员大池 & 活跃成员池的模糊查询过滤"""
+        search_text = text.strip().lower()
+        for i in range(self.pool_list.count()):
+            item = self.pool_list.item(i)
+            name = item.data(Qt.ItemDataRole.UserRole)
+            if name:
+                item.setHidden(search_text not in name.lower())
+
+        for i in range(self.active_member_pool_list.count()):
+            item = self.active_member_pool_list.item(i)
+            name = item.data(Qt.ItemDataRole.UserRole)
+            if name:
+                item.setHidden(search_text not in name.lower())
+
+    def _on_search_player(self, text: str) -> None:
+        """选手大池 & 活跃选手池的模糊查询过滤"""
+        search_text = text.strip().lower()
+        for i in range(self.player_pool_list.count()):
+            item = self.player_pool_list.item(i)
+            name = item.data(Qt.ItemDataRole.UserRole)
+            if name:
+                item.setHidden(search_text not in name.lower())
+
+        for i in range(self.active_player_pool_list.count()):
+            item = self.active_player_pool_list.item(i)
+            name = item.data(Qt.ItemDataRole.UserRole)
+            if name:
+                item.setHidden(search_text not in name.lower())
+
     def _refresh_history(self) -> None:
         """刷新往期比赛历史表格"""
         histories = self.repo.get_match_history()
+        self.histories_data = histories
         self.history_table.setRowCount(len(histories))
 
         for row_idx, h in enumerate(histories):
@@ -1257,6 +1767,26 @@ class MainWindow(QMainWindow):
             profit_item.setForeground(QColor(profit_color))
             profit_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
             self.history_table.setItem(row_idx, 8, profit_item)
+
+    def _on_history_item_double_clicked(self, item: QTableWidgetItem) -> None:
+        """双击历史记录列表某一行，弹出结构化对局详情"""
+        row = item.row()
+        if hasattr(self, "histories_data") and row < len(self.histories_data):
+            h = self.histories_data[row]
+            dialog = MatchHistoryDetailsDialog(h, self)
+            dialog.exec()
+
+    def _on_view_selected_history_detail(self) -> None:
+        """查看当前选中行的详情（点下部按钮触发）"""
+        selected_items = self.history_table.selectedItems()
+        if not selected_items:
+            QMessageBox.information(self, "💡 提示", "请先在往期比赛历史列表中点击选择一行！")
+            return
+        row = selected_items[0].row()
+        if hasattr(self, "histories_data") and row < len(self.histories_data):
+            h = self.histories_data[row]
+            dialog = MatchHistoryDetailsDialog(h, self)
+            dialog.exec()
 
     def _refresh_total_ladder(self) -> None:
         """刷新历史累计总榜"""
@@ -1476,16 +2006,21 @@ class MainWindow(QMainWindow):
     def _delete_pool_item(self, pool_type: str, name: str) -> None:
         """彻底从数据库物理删除某项成员或游戏账号"""
         try:
+            # 1. 事务只执行删除操作，确保 write 提交后才读取，防止内部查询隔离读到旧值
             with self.repo.db_manager.connection(write=True) as conn:
                 if pool_type == "member":
                     conn.execute("DELETE FROM members WHERE name = ?", (name,))
-                    self.members = self.repo.get_all_members()
-                    self._refresh_pool()
-                    self._refresh_total_ladder()
                 else:
                     conn.execute("DELETE FROM game_accounts WHERE nickname = ?", (name,))
-                    self.game_accounts = self.repo.get_all_game_accounts()
-                    self._refresh_player_pool()
+            
+            # 2. 事务完全提交后，再读取数据库最新成员/账号列表并刷新界面，解决需点击两次才消失的问题
+            if pool_type == "member":
+                self.members = self.repo.get_all_members()
+                self._refresh_pool()
+                self._refresh_total_ladder()
+            else:
+                self.game_accounts = self.repo.get_all_game_accounts()
+                self._refresh_player_pool()
         except Exception as e:
             QMessageBox.critical(self, "❌ 删除失败", f"数据库删除时出错：\n{e}")
 
@@ -1503,6 +2038,9 @@ class MainWindow(QMainWindow):
             self.current_tournament = self.repo.start_tournament()
             self.current_round_number = 1
             self._blind_bets.clear()
+            self.active_members_this_tournament.clear()
+            self.active_players_this_tournament.clear()
+            self._refresh_active_pools()
             self._update_tournament_status()
             self._refresh_tournament_ladder()
             self._on_reset_round()
@@ -1538,6 +2076,9 @@ class MainWindow(QMainWindow):
             self.current_tournament = None
             self.current_round_number = 1
             self._blind_bets.clear()
+            self.active_members_this_tournament.clear()
+            self.active_players_this_tournament.clear()
+            self._refresh_active_pools()
             self._update_tournament_status()
             self._on_reset_round()
             self._refresh_history()
@@ -1704,6 +2245,7 @@ class MainWindow(QMainWindow):
         # 重新加载大池和选手大池
         self._refresh_pool()
         self._refresh_player_pool()
+        self._refresh_active_pools()
 
     def _on_export_excel(self) -> None:
         """导出全部结果到 Excel"""
@@ -1773,6 +2315,75 @@ class MainWindow(QMainWindow):
             for col in ws2.columns:
                 max_len = max(len(str(cell.value or "")) for cell in col)
                 ws2.column_dimensions[col[0].column_letter].width = max(max_len + 4, 10)
+
+            # Sheet 3: 本届赛事盈亏榜（仅统计今天真正参与过且产生盈亏的活跃选手和成员）
+            t_id = None
+            if self.current_tournament:
+                t_id = self.current_tournament.id
+            else:
+                with self.repo.db_manager.connection() as conn:
+                    cursor = conn.cursor()
+                    cursor.execute("SELECT MAX(id) FROM tournaments")
+                    row = cursor.fetchone()
+                    if row and row[0] is not None:
+                        t_id = row[0]
+
+            if t_id:
+                ws3 = wb.create_sheet("本届赛事盈亏榜")
+                headers3 = ["赛事ID", "排名", "成员/选手", "本届盈亏", "身份类型"]
+                ws3.append(headers3)
+                for cell in ws3[1]:
+                    cell.font = header_font
+                    cell.fill = header_fill
+                    cell.alignment = Alignment(horizontal="center")
+
+                # 1. 物理从数据库直接查出庄家的名字与本届赛事庄家累计盈亏
+                banker_name = "主持人(庄家)"
+                banker_profit = 0
+                with self.repo.db_manager.connection() as conn:
+                    cursor = conn.cursor()
+                    cursor.execute("SELECT name FROM members WHERE is_banker = 1 LIMIT 1")
+                    row_name = cursor.fetchone()
+                    if row_name:
+                        banker_name = row_name[0]
+                    
+                    cursor.execute("SELECT banker_profit FROM tournaments WHERE id = ?", (t_id,))
+                    row_profit = cursor.fetchone()
+                    if row_profit and row_profit[0] is not None:
+                        banker_profit = row_profit[0]
+
+                # 2. 写入置顶第一行的庄家数据
+                ws3.append([
+                    t_id,
+                    "★",
+                    banker_name,
+                    banker_profit,
+                    "庄家(主持人)"
+                ])
+
+                # 3. 提取其他普通下注与参赛成员（过滤掉盈亏为 0 的今天未参与的普通人）
+                raw_ladder = self.repo.get_tournament_leaderboard(t_id)
+                others = []
+                for p in raw_ladder:
+                    profit = p.get("tournament_profit", 0)
+                    # 排除今天没有参与的非活跃人员，且因为庄家上面已物理写入，这里遇到庄家名字也不重复录入
+                    if profit != 0 and p.get("name") != banker_name:
+                        others.append(p)
+
+                # 按本届盈亏降序排序普通人员并写入，从排名1开始顺延
+                sorted_others = sorted(others, key=lambda x: x.get("tournament_profit", 0), reverse=True)
+                for idx, p in enumerate(sorted_others, 1):
+                    ws3.append([
+                        t_id,
+                        idx,
+                        p.get("name"),
+                        p.get("tournament_profit", 0),
+                        "活跃成员/选手"
+                    ])
+
+                for col in ws3.columns:
+                    max_len = max(len(str(cell.value or "")) for cell in col)
+                    ws3.column_dimensions[col[0].column_letter].width = max(max_len + 4, 10)
 
             wb.save(file_path)
             QMessageBox.information(self, "✅ 导出成功", f"数据已导出到：\n{file_path}")

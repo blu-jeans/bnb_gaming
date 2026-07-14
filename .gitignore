@@ -7,3 +7,8 @@ venv/
 *.db-journal
 *.log
 .ai_outputs/
+.agents/
+bnb_guessing.db
+build/
+dist/
+*.spec

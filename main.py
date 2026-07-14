@@ -5,11 +5,15 @@
 单机本地运行，数据库随 exe 同目录自动生成。
 
 @author hyq
-@version 2026-07-13
+@version 2026-07-14
 """
 
 import os
 import sys
+
+# 【防闪退黄金配置】解决部分精简版 Win10 / 老旧电脑因 OpenGL 显卡硬件加速初始化失败导致秒退的经典缺陷
+os.environ["QT_QUICK_BACKEND"] = "software"
+os.environ["QT_OPENGL"] = "software"
 
 from PyQt6.QtWidgets import QApplication
 from PyQt6.QtGui import QFont
